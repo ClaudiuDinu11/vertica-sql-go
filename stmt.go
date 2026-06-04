@@ -42,6 +42,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -226,22 +227,75 @@ func (s *stmt) Query(args []driver.Value) (driver.Rows, error) {
 func (s *stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
 	stmtLogger.Trace("stmt.ExecContext()")
 
-	rows, err := s.QueryContext(ctx, args)
+	queryRows, err := s.QueryContext(ctx, args)
 
 	if err != nil {
 		return driver.ResultNoRows, err
 	}
 
-	numCols := len(rows.Columns())
+	// Prefer the affected-row count from the CommandComplete tag. On the
+	// simple-query (client-side interpolation) path Vertica reports DML counts
+	// there rather than as an OUTPUT data row, so without this RowsAffected()
+	// would always be 0. Fall back to the legacy OUTPUT-data-row behaviour for
+	// the prepared/extended path.
+	if affected, ok := execRowsAffected(queryRows); ok {
+		return &result{lastInsertID: 0, rowsAffected: affected}, nil
+	}
+
+	numCols := len(queryRows.Columns())
+	if numCols == 0 {
+		return driver.ResultNoRows, nil
+	}
 	vals := make([]driver.Value, numCols)
 
-	if rows.Next(vals) == io.EOF {
+	if queryRows.Next(vals) == io.EOF {
 		return driver.ResultNoRows, nil
 	}
 
 	rv := reflect.ValueOf(vals[0])
 
 	return &result{lastInsertID: 0, rowsAffected: rv.Int()}, nil
+}
+
+// parseRowsAffectedTag extracts the affected-row count from a CommandComplete
+// tag such as "UPDATE 1", "DELETE 3" or "INSERT 0 1"; the count is always the
+// final whitespace-delimited token. Tags without a trailing integer (e.g. DDL
+// like "CREATE TABLE") return ok=false so the caller treats them as no-result.
+func parseRowsAffectedTag(tag string) (int64, bool) {
+	fields := strings.Fields(tag)
+	if len(fields) == 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(fields[len(fields)-1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// execRowsAffected returns the affected-row count captured from CommandComplete
+// tags, if any statement reported one. Counts from multi-statement executions
+// are summed.
+func execRowsAffected(r driver.Rows) (int64, bool) {
+	switch v := r.(type) {
+	case *rows:
+		if v.hasCmdComplete {
+			return v.rowsAffected, true
+		}
+	case *multiRows:
+		var total int64
+		found := false
+		for _, set := range v.sets {
+			if set != nil && set.hasCmdComplete {
+				total += set.rowsAffected
+				found = true
+			}
+		}
+		if found {
+			return total, true
+		}
+	}
+	return 0, false
 }
 
 func (s *stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
@@ -375,7 +429,15 @@ func (s *stmt) runSimpleStatement(ctx context.Context, sql string) (*rows, error
 			result = newRows(ctx, msg, s.conn.serverTZOffset)
 		case *msgs.BECmdDescriptionMsg:
 			continue
-		case *msgs.BECmdCompleteMsg, *msgs.BEParseCompleteMsg:
+		case *msgs.BECmdCompleteMsg:
+			// Vertica reports DML row counts in the CommandComplete tag
+			// (e.g. "UPDATE 1", "DELETE 3", "INSERT 0 1"), not as a data row.
+			if n, ok := parseRowsAffectedTag(msg.Tag); ok {
+				result.rowsAffected = n
+				result.hasCmdComplete = true
+			}
+			continue
+		case *msgs.BEParseCompleteMsg:
 			continue
 		case *msgs.BEErrorMsg:
 			return newEmptyRows(), s.evaluateErrorMsg(msg)

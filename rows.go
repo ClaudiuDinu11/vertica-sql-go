@@ -64,6 +64,9 @@ type rows struct {
 
 	tzOffset      string
 	inMemRowLimit int
+
+	rowsAffected   int64
+	hasCmdComplete bool
 }
 
 var (
