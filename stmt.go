@@ -459,6 +459,8 @@ func (s *stmt) formatArg(arg driver.NamedValue) string {
 			v.Minute(),
 			v.Second(),
 			v.Nanosecond())
+	case []byte:
+		replaceStr = fmt.Sprintf("'%s'", s.cleanQuotes(string(v)))
 	default:
 		replaceStr = "?unknown_type?"
 	}
