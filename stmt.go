@@ -33,8 +33,10 @@ package vertigo
 // THE SOFTWARE.
 
 import (
+	"bytes"
 	"context"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vertica/vertica-sql-go/common"
 	"github.com/vertica/vertica-sql-go/logger"
@@ -522,7 +525,17 @@ func (s *stmt) formatArg(arg driver.NamedValue) string {
 			v.Second(),
 			v.Nanosecond())
 	case []byte:
-		replaceStr = fmt.Sprintf("'%s'", s.cleanQuotes(string(v)))
+		// Vertica string literals are NUL-terminated on the simple-query wire
+		// protocol and VARCHAR columns require valid UTF-8. Text-like payloads
+		// (e.g. resource JSON) use a quoted literal, which also casts cleanly into
+		// VARBINARY columns; true binary (e.g. encrypted secrets) is emitted as a
+		// hex VARBINARY literal, which is correct and, since hex is [0-9a-f] only,
+		// injection-proof.
+		if utf8.Valid(v) && !bytes.Contains(v, []byte{0}) {
+			replaceStr = fmt.Sprintf("'%s'", s.cleanQuotes(string(v)))
+		} else {
+			replaceStr = fmt.Sprintf("HEX_TO_BINARY('%s')", hex.EncodeToString(v))
+		}
 	default:
 		replaceStr = "?unknown_type?"
 	}

@@ -117,6 +117,30 @@ func TestInterpolate(t *testing.T) {
 			expected: "select * from something where value = 'replace' and test = '?bad'",
 			args:     []driver.NamedValue{{Value: "replace"}},
 		},
+		{
+			name:     "text bytes use a quoted literal",
+			command:  "select * from something where value = ?",
+			expected: "select * from something where value = 'taco'",
+			args:     []driver.NamedValue{{Value: []byte("taco")}},
+		},
+		{
+			name:     "text bytes escape embedded quotes",
+			command:  "select * from something where value = ?",
+			expected: "select * from something where value = 'it''s'",
+			args:     []driver.NamedValue{{Value: []byte("it's")}},
+		},
+		{
+			name:     "bytes with NUL use a hex varbinary literal",
+			command:  "select * from something where value = ?",
+			expected: "select * from something where value = HEX_TO_BINARY('00ff10')",
+			args:     []driver.NamedValue{{Value: []byte{0x00, 0xff, 0x10}}},
+		},
+		{
+			name:     "non-utf8 bytes use a hex varbinary literal",
+			command:  "select * from something where value = ?",
+			expected: "select * from something where value = HEX_TO_BINARY('ff')",
+			args:     []driver.NamedValue{{Value: []byte{0xff}}},
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
